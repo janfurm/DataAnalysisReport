@@ -1,0 +1,248 @@
+---
+title: "Raport z analizy danych"
+author: "Jan Furmanowski"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Wstêp
+
+W niniejszym raporcie przedstawiono dzia³ania podjête w celu okreœlenia g³ównych przyczyn zmniejszania siê d³ugoœci œledzi oceanicznych wy³awianych w Europie. Predykcja zosta³a dokonana w oparciu o model przygotowany na zbiorze danych opisanym w sekcji [Zbiór danych](#data_set). W oparciu o przyjête miary najlepszy okaza³ siê model z algorytmem Random Forest.
+
+W wyniku przeprowadzonej analizy jako czynniki maj¹ce wp³yw na zmniejszenie siê d³ugoœci œledzi wskazano zmianê temperatury przy powierzchni wody, a tak¿e dostêpnoœæ planktonu _Calanus finmarchicus_ gat. 1 oraz wid³onogów gat. 1.
+
+
+## Ustawienia œrodowiska
+
+### Biblioteki
+
+Do przeprowadzenia analizy oraz wygenerowania raporu zosta³y wykorzystane nastêpuj¹ce biblioteki:
+
+```{r libraries, message=FALSE, warning=FALSE}
+library('knitr')
+library('dplyr')
+library('corrplot')
+library('ggplot2')
+library('randomForest')
+library('caret')
+```
+
+### Zapewnienie powtarzalnoœci
+
+Celem zapewnienia powtarzalnoœci oraz odtwarzalnoœci zaprezentowanych wyników analizy ustawiono sta³¹ wartoœæ ziarna generatora (ang. _seed_). Fragment kodu odpowiedzialny za tê funkcjonalnoœæ zosta³ przedstawiony poni¿ej.
+
+```{r reproducibility}
+set.seed(123)
+```
+
+## Zbiór danych {#data_set}
+
+Dane wykorzystane do analizy stanowi¹ pomiary œledzi oraz warunków w jakich ¿yj¹ z ostatnich 60 lat. Dane te zosta³y zebrane podczas po³owów komercyjnych jednostek. W ramach po³owu jednej jednostki losowo wybierano od 50 do 100 sztuk trzyletnich œledzi.
+
+Zbiór danych zosta³ pobrany ze strony <http://www.cs.put.poznan.pl/dbrzezinski/teaching/zed/sledzie.csv> (dostêp 10-11-2016).
+
+### Wczytanie danych
+
+W analizowanym zbiorze danych znajduj¹ siê wartoœci puste, nieznane (NA, ang. _Not Avaible_), które zosta³y w tym przypadku oznaczone symbolem ?.
+
+```{r r_data_loading, cache=TRUE}
+herr_data <-read.csv("sledzie.csv", na.strings = "?", comment.char = "")
+```
+
+### Opis atrybutów
+
+Znaczenie kolejnych kolumn reprezentuj¹cych atrybuty zosta³y przedstawione w poni¿szej tabeli.
+
+| atrybut     | informacja                                          | jednostka     |
+|-------------|----------------------------------------|----------------------------|
+| __length__  | d³ugoœæ z³owionego œledzia                          | cm            |
+| __cfin1__   | dostêpnoœæ planktonu _Calanus finmarchicus_ gat. 1  | zagêszczenie  |
+| __cfin2__   | dostêpnoœæ planktonu _Calanus finmarchicus_ gat. 2  | zagêszczenie  |
+| __chel1__   | dostêpnoœæ planktonu _Calanus helgolandicus_ gat. 1 | zagêszczenie  |
+| __chel2__   | dostêpnoœæ planktonu _Calanus helgolandicus_ gat. 2 | zagêszczenie  |
+| __lcop1__   | dostêpnoœæ planktonu wid³onogów gat. 1              | zagêszczenie  |
+| __lcop2__   | dostêpnoœæ planktonu wid³onogów gat. 2              | zagêszczenie  |
+| __fbar__    | natê¿enie po³owów w regionie                        | u³amek pozostawionego narybku |
+| __recr__    | roczny narybek                                      | liczba œledzi                 |
+| __cumf__    | ³¹czne roczne natê¿enie po³owów w regionie          | u³amek pozostawionego narybku |
+| __totaln__  | ³¹czna liczba ryb z³owionych w ramach po³owu        | liczba œledzi                 |
+| __sst__     | temperatura przy powierzchni wody                   | °C                            |
+| __sal__     | poziom zasolenia wody                               | Knudsen ppt                   |
+| __xmonth__  | miesi¹c po³owu                                      | numer miesi¹ca                |
+| __nao__     | oscylacja pó³nocnoatlantycka                        | mb                            |
+
+### Podstawowe informacje
+
+Dane s¹ zorganizowane wierszowo - ka¿dy wiersz odpowiada pojedynczemu po³owowi, natomiast kolumny odpowiadaj¹ zarejestrowanym zmiennym (atrybutom).
+
+Zbiór danych sk³ada siê z *`r dim(herr_data)[2]`* atrybutów oraz *`r dim(herr_data)[1]`* rekordów.
+
+```{r r_summary, cache=TRUE}
+kable(summary(herr_data))
+```
+
+## Przygotowanie zbioru danych
+
+### Brakuj¹ce dane
+
+Kolejny etap analizy stanowi oczyszczenie danych, którego istotnym elementem jest przetworzenie brakuj¹cych danych. Po wnikliwej analizie surowego zbioru danych zauwa¿ono, ¿e brakuj¹ce wartoœci mo¿na uzupe³niæ na podstawie grup utworzonych na podstawie wartoœci atrybutów _totaln_ oraz _recr_. W ramach tak zdefiniowanych grup wartoœci posczególnych atrybutów z brakuj¹cymi wartoœciami s¹ takie same. Aby dodatkowo uniezale¿niæ siê od wp³ywu ewentualnych wartoœci odstaj¹cych w ramach grupy (ang. _outliers_) brakuj¹ce wartoœci s¹ estymowane za pomoc¹ mediany.
+
+```{r r_missing_values, cache=TRUE}
+na_cols <- names(which(colSums(is.na(herr_data))>0))
+
+fill_na <- function(x) ifelse(is.na(x), median(x, na.rm=TRUE), x)
+herr_data_nona <-  herr_data %>% 
+  group_by(totaln, recr) %>% 
+  mutate_each(funs(fill_na), one_of(na_cols)) %>%
+  ungroup
+```
+
+### Analiza korelacji pomiêdz atrybutami
+
+Nastêpn¹ fazê przetwarzania stanowi³a analiza korelacji pomiêdzy zmiennymi. Wartoœæ wspó³czynników korealcji pomiêdzy poszczególnymi atrybutmi zosta³ zwizualizowany na poni¿szym rysunku. 
+
+```{r r_correlation, cache=TRUE, fig.height=8}
+herr_mcorr <- cor(herr_data_nona)
+corrplot(herr_mcorr, type = "upper", method="color", addCoef.col = "black", tl.col="black", number.digits=2, number.cex=0.75) 
+```
+
+Z analizy powy¿szej macierzy korelacji wynika, ¿e zachodzi du¿a korelacja miêdzy zmiennymi _chel1_ oraz _lcop1_ (`r round(herr_mcorr["chel1","lcop1"], 2)`), _chel2_ oraz _lcop2_ (`r round(herr_mcorr["chel2","lcop2"], 2)`), a tak¿e _fbar_ oraz _cumf_ (`r round(herr_mcorr["fbar","cumf"], 2)`). Wobec wystêpowania wysokiej korelacji pomiêdzy wspomnianymi zmiennymi atrybuty _lcop1_, _chel2_ oraz _cumf_ zosta³y wykluczone, jako redundante, nie wnosz¹ce nowych informacji do analizy.
+
+```{r r_select_attributes, cache=TRUE, fig.height=8}
+herr_data_nona <- herr_data_nona[ , -which(names(herr_data_nona) %in% c("lcop1", "lcop2", "cumf", "xmonth"))]
+```
+
+## Histogram
+
+```{r attributes_analysis, message=FALSE , warning=FALSE , error = FALSE}
+for(i in 2:5) {
+  print(
+    ggplot(herr_data_nona, aes(x = herr_data_nona[i])) + 
+      geom_histogram(bins = 30, fill="#56B4E9") + 
+      labs(x = colnames(herr_data_nona)[i], y = "liczba wartoœci") + 
+      ggtitle(paste("Histogram atrybutu", colnames(herr_data_nona)[i])) + 
+      theme_light()
+  )
+}
+```
+
+## Zmiana d³ugoœci œledzi w czasie
+
+Poni¿szy wykres przedstawia zmianê d³ugoœci œledzi w czasie (zgodnie z opisem dane by³y uporz¹dkowane chronologicznie). Niestety w samym zbiorze, jak i jego opisie nie zosta³y wyspecyfikowane dok³adne ramy czasowe pomiarów.
+
+```{r size_change, message=FALSE , warning=FALSE , error = FALSE}
+library("plotly")
+
+plot <- ggplot(herr_data_nona, aes(x=X, y=length)) + 
+  geom_point() + 
+  geom_smooth(method="auto", se=TRUE, color="red") +
+  labs(title="Wykres zmiany d³ugoœci œliedzi w czasie", x="Czas", y="D³ugoœæ œledzia")
+
+ggplotly( plot )
+```
+
+Wykres potwierdza postawiony problem badawczy malej¹cej od pewnego momentu d³ugoœci œledzia.
+
+
+
+## Regresor
+
+### Podzia³ zbioru danych
+
+W celu stworzenia i oceny regresora konieczne jest podzielenie zbioru danych na dane ucz¹ce, waliduj¹ce i testowe. Dane ucz¹ce i walidacyjne zosta³y wykorzystane do budowy i optymalizacji parametrów modelu. Natomiast dane testowe pos³u¿y³y do wyboru modelu oraz jego koñcowej oceny.
+
+```{r data_set_split, message=FALSE , warning=FALSE , error = FALSE}
+in_training <- 
+    createDataPartition(
+        # atrybut do stratyfikacji
+        y = herr_data_nona$length,
+        # procent w zbiorze ucz¹cym
+        p = .75,
+        # zwracamy indeksy
+        list = FALSE)
+
+training <- herr_data_nona[ in_training,]
+testing  <- herr_data_nona[-in_training,]
+```
+
+
+### Budowa modelu
+
+W wyniku przeprowadzonych badañ model klasyfikacyjny zosta³ utworzony zgodnie z algorytmem Random Forest. Do budowy i opytymalizacji modelu wykorzystano powtórzon¹ ocenê krzy¿ow¹ z podzia³em na 2 czêœci i 4 powtórzeniami.
+
+```{r regressor, message=FALSE, warning=FALSE, error=FALSE}
+regr_ctrl <- trainControl(
+    # powtórzona ocena krzy¿owa
+    method = "repeatedcv",
+    # liczba podzia³ów
+    number = 2,
+    # liczba powtórzeñ
+    repeats = 4)
+
+rf_regr <- train(length ~ .,
+             data = training,
+             # Algorytm Random Forest
+             method = "rf",
+             trControl = regr_ctrl,
+             ntree = 10,
+             importance = TRUE)
+```
+
+Ostatecznie, w procesie uczenia jako optymalne zosta³y dobrane nastêpuj¹ce wartoœci parametrów regresora.
+
+```{r regressor_info, message=FALSE, warning=FALSE, error=FALSE, echo=FALSE}
+rf_regr
+```
+
+
+### Ocena modelu
+
+Oceny modelu dokonano na podstawie wczeœniej przygotowanego zbioru testowego. Jako miary oceny przyjêto [R2](https://en.wikipedia.org/wiki/Coefficient_of_determination) oraz [RMSE](https://en.wikipedia.org/wiki/Root-mean-square_deviation).
+
+```{r regressor_rate, message=FALSE , warning=FALSE , error = FALSE}
+predicted <- predict(rf_regr, testing)
+observed <- testing[, 'length']
+  
+SS_res <- sum( (observed - predicted)^2 )
+SS_tot <- sum( (observed - mean(observed))^2 )
+R_squared <- 1 - SS_res/SS_tot
+
+RMSE <- sqrt( mean((observed - predicted)^2) / length(predicted) )
+length(predicted)
+```
+
+| miara       | wartoœæ     |
+|-------------|-------------|
+| R2          | *`r round( R_squared, digits=2 )`* |
+| RMSE        | *`r round( RMSE, digits=2 )`*      |
+
+
+## Ocena wa¿noœci atrybutów
+
+Ocena wa¿noœci atrybutów ma za zadanie wskazaæ jakie atrybuty (czynniki) mia³y wp³yw na to, ¿e rozmiar œledzi zacz¹³ w pewnym momencie maleæ.
+
+```{r attribute_importance, message=FALSE, warning=FALSE, error=FALSE}
+varImp(rf_regr)
+```
+
+Z powy¿szej tabeli wynika, ¿e najistotniejszy jest atrybut _sst_ reprezentuj¹cy temperaturê przy powierzchni wody. Nieco mniej wa¿ny jest atrybut _chel1_ reprezentuj¹cy dostêpnoœæ planktonu _Calanus finmarchicus_ gat. 1. Warto zwróciæ uwagê, ¿e atrybut _chel1_ by³ silnie skorelowany (i z tego powodu odrzuconym z analizy, jako redundantny) atrybutem _lcop1_ (`r round(herr_mcorr["chel1","lcop1"], 2)`). Zatem równie¿ dostêpnoœæ planktonu w postaci wid³onogów gat. 1 ma wp³yw na zmniejszenie d³ugoœci œledzi.
+
+```{r temperature_influence, message=FALSE, warning=FALSE, error=FALSE}
+temp <- herr_data_nona %>% select (X, sst, length)
+temp_melt <- melt(temp, id.vars='X')
+
+temp_plot <- ggplot(temp_melt, aes(x=X, y=value)) +
+  geom_point(size = 0.45, alpha = 0.5, color="grey") +
+  geom_smooth(size = 2) +
+  facet_grid(variable~., scales='free') +
+  labs(title="Wykres zale¿noœci d³ugoœci i temperatury od czasu", x="Czas", y="D³ugoœæ | Temperatura") +
+  theme_light()
+```
+
+ToDo: Remove X parameter from analysis; correct data formating
+
+Nale¿y zauwa¿yæ, ¿e istotnoœæ ¿adnego z atrybutów nie przekracza `r `, co mo¿e oznaczaæ, ¿e tak¿e inne atrybuty nie uwzglêdnione w zbiorze danych mog³y mieæ równie istotny wp³yw na zmniejszenie siê d³ugoœci œledzi. Przyk³adowe czynniki mog¹ce mieæ wp³yw to zanieczyszczenie wody, czy dostêpnoœæ œwiat³a.
